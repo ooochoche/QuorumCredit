@@ -21,8 +21,13 @@ const LOAN_EXPIRY_SECONDS: u64 = 30 * 24 * 60 * 60;
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ContractError {
     InsufficientFunds = 1,
+<<<<<<< fix/duplicate-loan-overwrite
+    /// Borrower already has an active (non-repaid, non-defaulted) loan.
+    ActiveLoanExists = 2,
+=======
     DuplicateVouch = 2,
     NoActiveLoan = 3,
+>>>>>>> main
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -129,6 +134,18 @@ impl QuorumCreditContract {
     ) -> Result<(), ContractError> {
         borrower.require_auth();
 
+<<<<<<< fix/duplicate-loan-overwrite
+        // Reject if an active (non-repaid, non-defaulted) loan already exists.
+        if let Some(existing) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, LoanRecord>(&DataKey::Loan(borrower.clone()))
+        {
+            if !existing.repaid && !existing.defaulted {
+                return Err(ContractError::ActiveLoanExists);
+            }
+        }
+=======
         assert!(amount >= MIN_LOAN_AMOUNT, "loan amount must meet minimum threshold");
         assert!(threshold > 0, "threshold must be greater than zero");
 
@@ -137,6 +154,7 @@ impl QuorumCreditContract {
             !env.storage().persistent().has(&DataKey::Loan(borrower.clone())),
             "borrower already has an active loan"
         );
+>>>>>>> main
 
         let vouches: Vec<VouchRecord> = env
             .storage()
@@ -492,14 +510,30 @@ mod tests {
     }
 
     #[test]
+<<<<<<< fix/duplicate-loan-overwrite
+    fn test_duplicate_loan_request_rejected() {
+=======
     #[should_panic(expected = "threshold must be greater than zero")]
     fn test_zero_threshold_rejected() {
+>>>>>>> main
         let env = Env::default();
         let (contract_id, _token_addr, _admin, borrower, voucher) = setup(&env);
         let client = QuorumCreditContractClient::new(&env, &contract_id);
 
         client.vouch(&voucher, &borrower, &1_000_000);
+<<<<<<< fix/duplicate-loan-overwrite
+        client.request_loan(&borrower, &500_000, &1_000_000);
+
+        // Second request_loan while first is still active should fail.
+        let result = client.try_request_loan(&borrower, &500_000, &1_000_000);
+        assert_eq!(
+            result,
+            Err(Ok(ContractError::ActiveLoanExists)),
+            "expected ActiveLoanExists error on duplicate loan request"
+        );
+=======
         client.request_loan(&borrower, &500_000, &0);
+>>>>>>> main
     }
 
     #[test]
