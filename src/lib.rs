@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, token, Address, Env, Vec};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, Env, Vec};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -21,13 +21,8 @@ const LOAN_EXPIRY_SECONDS: u64 = 30 * 24 * 60 * 60;
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ContractError {
     InsufficientFunds = 1,
-<<<<<<< fix/duplicate-loan-overwrite
-    /// Borrower already has an active (non-repaid, non-defaulted) loan.
-    ActiveLoanExists = 2,
-=======
     DuplicateVouch = 2,
     NoActiveLoan = 3,
->>>>>>> main
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -90,7 +85,12 @@ impl QuorumCreditContract {
     }
 
     /// Stake XLM to vouch for a borrower.
-    pub fn vouch(env: Env, voucher: Address, borrower: Address, stake: i128) -> Result<(), ContractError> {
+    pub fn vouch(
+        env: Env,
+        voucher: Address,
+        borrower: Address,
+        stake: i128,
+    ) -> Result<(), ContractError> {
         voucher.require_auth();
 
         assert!(voucher != borrower, "voucher cannot vouch for self");
@@ -134,27 +134,19 @@ impl QuorumCreditContract {
     ) -> Result<(), ContractError> {
         borrower.require_auth();
 
-<<<<<<< fix/duplicate-loan-overwrite
-        // Reject if an active (non-repaid, non-defaulted) loan already exists.
-        if let Some(existing) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, LoanRecord>(&DataKey::Loan(borrower.clone()))
-        {
-            if !existing.repaid && !existing.defaulted {
-                return Err(ContractError::ActiveLoanExists);
-            }
-        }
-=======
-        assert!(amount >= MIN_LOAN_AMOUNT, "loan amount must meet minimum threshold");
+        assert!(
+            amount >= MIN_LOAN_AMOUNT,
+            "loan amount must meet minimum threshold"
+        );
         assert!(threshold > 0, "threshold must be greater than zero");
 
         // Prevent multiple active loans.
         assert!(
-            !env.storage().persistent().has(&DataKey::Loan(borrower.clone())),
+            !env.storage()
+                .persistent()
+                .has(&DataKey::Loan(borrower.clone())),
             "borrower already has an active loan"
         );
->>>>>>> main
 
         let vouches: Vec<VouchRecord> = env
             .storage()
@@ -243,7 +235,7 @@ impl QuorumCreditContract {
         env.storage()
             .persistent()
             .set(&DataKey::Loan(borrower), &loan);
-        
+
         Ok(())
     }
 
@@ -280,8 +272,14 @@ impl QuorumCreditContract {
                 token.transfer(&env.current_contract_address(), &v.voucher, &returned);
             }
             // Accumulate slashed amount in treasury.
-            let treasury: i128 = env.storage().instance().get(&DataKey::SlashTreasury).unwrap_or(0);
-            env.storage().instance().set(&DataKey::SlashTreasury, &(treasury + slash_amount));
+            let treasury: i128 = env
+                .storage()
+                .instance()
+                .get(&DataKey::SlashTreasury)
+                .unwrap_or(0);
+            env.storage()
+                .instance()
+                .set(&DataKey::SlashTreasury, &(treasury + slash_amount));
         }
 
         loan.defaulted = true;
@@ -290,7 +288,9 @@ impl QuorumCreditContract {
             .set(&DataKey::Loan(borrower.clone()), &loan);
 
         // Clear vouches after slashing to prevent state pollution.
-        env.storage().persistent().remove(&DataKey::Vouches(borrower));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Vouches(borrower));
     }
 
     /// Allows vouchers to claim back their stake if loan has expired without repayment or slash.
@@ -327,7 +327,9 @@ impl QuorumCreditContract {
             .set(&DataKey::Loan(borrower.clone()), &loan);
 
         // Clear vouches after claim.
-        env.storage().persistent().remove(&DataKey::Vouches(borrower));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Vouches(borrower));
     }
 
     /// Admin withdraws accumulated slashed funds to a recipient address.
@@ -339,10 +341,16 @@ impl QuorumCreditContract {
             .expect("not initialized");
         admin.require_auth();
 
-        let amount: i128 = env.storage().instance().get(&DataKey::SlashTreasury).unwrap_or(0);
+        let amount: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::SlashTreasury)
+            .unwrap_or(0);
         assert!(amount > 0, "no slashed funds to withdraw");
 
-        env.storage().instance().set(&DataKey::SlashTreasury, &0i128);
+        env.storage()
+            .instance()
+            .set(&DataKey::SlashTreasury, &0i128);
         Self::token(&env).transfer(&env.current_contract_address(), &recipient, &amount);
     }
 
@@ -393,18 +401,18 @@ impl QuorumCreditContract {
     // ── Views ─────────────────────────────────────────────────────────────────
 
     pub fn get_slash_treasury(env: Env) -> i128 {
-        env.storage().instance().get(&DataKey::SlashTreasury).unwrap_or(0)
+        env.storage()
+            .instance()
+            .get(&DataKey::SlashTreasury)
+            .unwrap_or(0)
     }
 
     pub fn get_loan(env: Env, borrower: Address) -> Option<LoanRecord> {
         env.storage().persistent().get(&DataKey::Loan(borrower))
     }
 
-    pub fn get_vouches(env: Env, borrower: Address) -> Vec<VouchRecord> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Vouches(borrower))
-            .unwrap_or(Vec::new(&env))
+    pub fn get_vouches(env: Env, borrower: Address) -> Option<Vec<VouchRecord>> {
+        env.storage().persistent().get(&DataKey::Vouches(borrower))
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -446,8 +454,11 @@ mod tests {
 
         // deployer == admin for test convenience; the key point is that
         // deployer.require_auth() is satisfied via mock_all_auths().
-        QuorumCreditContractClient::new(env, &contract_id)
-            .initialize(&admin, &admin, &token_id.address());
+        QuorumCreditContractClient::new(env, &contract_id).initialize(
+            &admin,
+            &admin,
+            &token_id.address(),
+        );
 
         (contract_id, token_id.address(), admin, borrower, voucher)
     }
@@ -510,30 +521,14 @@ mod tests {
     }
 
     #[test]
-<<<<<<< fix/duplicate-loan-overwrite
-    fn test_duplicate_loan_request_rejected() {
-=======
     #[should_panic(expected = "threshold must be greater than zero")]
     fn test_zero_threshold_rejected() {
->>>>>>> main
         let env = Env::default();
         let (contract_id, _token_addr, _admin, borrower, voucher) = setup(&env);
         let client = QuorumCreditContractClient::new(&env, &contract_id);
 
         client.vouch(&voucher, &borrower, &1_000_000);
-<<<<<<< fix/duplicate-loan-overwrite
-        client.request_loan(&borrower, &500_000, &1_000_000);
-
-        // Second request_loan while first is still active should fail.
-        let result = client.try_request_loan(&borrower, &500_000, &1_000_000);
-        assert_eq!(
-            result,
-            Err(Ok(ContractError::ActiveLoanExists)),
-            "expected ActiveLoanExists error on duplicate loan request"
-        );
-=======
         client.request_loan(&borrower, &500_000, &0);
->>>>>>> main
     }
 
     #[test]
@@ -554,8 +549,11 @@ mod tests {
         // Contract balance starts at 0; after vouch it will hold 1_000_000.
         // Request a loan larger than the contract balance to trigger InsufficientFunds.
 
-        QuorumCreditContractClient::new(&env, &contract_id)
-            .initialize(&admin, &admin, &token_id.address());
+        QuorumCreditContractClient::new(&env, &contract_id).initialize(
+            &admin,
+            &admin,
+            &token_id.address(),
+        );
 
         let client = QuorumCreditContractClient::new(&env, &contract_id);
         // Stake 1_000_000 — contract now holds exactly 1_000_000.
@@ -588,7 +586,7 @@ mod tests {
         );
 
         // Verify only one vouch record exists
-        let vouches = client.get_vouches(&borrower);
+        let vouches = client.get_vouches(&borrower).unwrap();
         assert_eq!(vouches.len(), 1);
         assert_eq!(vouches.get(0).unwrap().stake, 1_000_000);
     }
@@ -628,7 +626,11 @@ mod tests {
         }
 
         // Request loan
-        client.request_loan(&borrower, &500_000, &(MAX_VOUCHERS_PER_LOAN as i128 * 1_000_000));
+        client.request_loan(
+            &borrower,
+            &500_000,
+            &(MAX_VOUCHERS_PER_LOAN as i128 * 1_000_000),
+        );
 
         // Repay
         client.repay(&borrower);
@@ -651,6 +653,9 @@ mod tests {
             Err(Ok(ContractError::NoActiveLoan)),
             "expected NoActiveLoan error when repaying non-existent loan"
         );
+    }
+
+    #[test]
     #[should_panic(expected = "maximum vouchers per loan exceeded")]
     fn test_vouch_exceeds_max_limit() {
         let env = Env::default();
@@ -678,9 +683,18 @@ mod tests {
     }
 
     #[test]
+    fn test_get_vouches_unknown_borrower_returns_none() {
+        let env = Env::default();
+        let (contract_id, _token_addr, _admin, borrower, _voucher) = setup(&env);
+        let client = QuorumCreditContractClient::new(&env, &contract_id);
+
+        assert!(client.get_vouches(&borrower).is_none());
+    }
+
+    #[test]
     fn test_slash_treasury_withdrawal() {
         let env = Env::default();
-        let (contract_id, token_addr, admin, borrower, voucher) = setup(&env);
+        let (contract_id, token_addr, _admin, borrower, voucher) = setup(&env);
         let client = QuorumCreditContractClient::new(&env, &contract_id);
         let token = TokenClient::new(&env, &token_addr);
 
