@@ -51,6 +51,7 @@ pub enum DataKey {
     Deployer,         // Address that deployed the contract; guards initialize
     SlashTreasury,    // i128 accumulated slashed funds
     Paused,           // bool: true when contract is paused
+    ReputationNft,    // Address of the ReputationNftContract
     Config,           // Config struct: all configurable protocol parameters
     ReputationNft,    // Address of the ReputationNftContract
 }
@@ -172,10 +173,18 @@ impl QuorumCreditContract {
         let token = Self::token(&env);
         token.transfer(&voucher, &env.current_contract_address(), &stake);
 
-        vouches.push_back(VouchRecord { voucher, stake });
+        vouches.push_back(VouchRecord {
+            voucher: voucher.clone(),
+            stake,
+        });
         env.storage()
             .persistent()
-            .set(&DataKey::Vouches(borrower), &vouches);
+            .set(&DataKey::Vouches(borrower.clone()), &vouches);
+
+        env.events().publish(
+            (symbol_short!("vouch"), symbol_short!("added")),
+            (voucher, borrower, stake),
+        );
 
         Ok(())
     }
@@ -888,6 +897,48 @@ mod tests {
             data.into_val(&env);
         assert_eq!(event_borrower, borrower);
         assert_eq!(event_amount, 500_000);
+    }
+
+    #[test]
+    fn test_vouch_emits_event() {
+        use soroban_sdk::{IntoVal, Val};
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let voucher = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let token_id = env.register_stellar_asset_contract_v2(admin.clone());
+        let token_admin = StellarAssetClient::new(&env, &token_id.address());
+        token_admin.mint(&voucher, &10_000_000);
+
+        let contract_id = env.register_contract(None, QuorumCreditContract);
+        let client = QuorumCreditContractClient::new(&env, &contract_id);
+        client.initialize(&admin, &admin, &token_id.address());
+
+        client.vouch(&voucher, &borrower, &1_000_000);
+
+        let topic_vouch: Val = symbol_short!("vouch").into_val(&env);
+        let topic_added: Val = symbol_short!("added").into_val(&env);
+
+        let (_, _, data) = env
+            .events()
+            .all()
+            .iter()
+            .find(|(_, topics, _)| {
+                topics.len() == 2
+                    && topics.get_unchecked(0).get_payload() == topic_vouch.get_payload()
+                    && topics.get_unchecked(1).get_payload() == topic_added.get_payload()
+            })
+            .expect("vouch_added event not emitted");
+
+        let (event_voucher, event_borrower, event_stake): (Address, Address, i128) =
+            data.into_val(&env);
+        assert_eq!(event_voucher, voucher);
+        assert_eq!(event_borrower, borrower);
+        assert_eq!(event_stake, 1_000_000);
     }
 
     #[test]
