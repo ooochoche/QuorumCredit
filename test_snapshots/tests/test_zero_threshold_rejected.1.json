@@ -1339,7 +1339,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'threshold must be greater than zero' from contract function 'Symbol(obj#325)'"
+                  "string": "caught panic 'threshold must be greater than zero' from contract function 'Symbol(obj#327)'"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
