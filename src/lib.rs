@@ -19,6 +19,8 @@ pub enum ContractError {
     ActiveLoanExists = 2,
     /// Total vouched stake overflowed i128.
     StakeOverflow = 3,
+    /// admin or token address must not be the zero address.
+    ZeroAddress = 4,
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -50,6 +52,23 @@ pub struct VouchRecord {
     pub stake: i128, // in stroops
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Returns true if the address is the all-zeros account or contract address.
+fn is_zero_address(env: &Env, addr: &Address) -> bool {
+    // Stellar zero account: all-zero 32-byte ed25519 key
+    let zero_account = Address::from_string(&soroban_sdk::String::from_str(
+        env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    ));
+    // Stellar zero contract: all-zero 32-byte contract hash
+    let zero_contract = Address::from_string(&soroban_sdk::String::from_str(
+        env,
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+    ));
+    addr == &zero_account || addr == &zero_contract
+}
+
 // ── Contract ──────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -63,7 +82,12 @@ impl QuorumCreditContract {
     /// sign this transaction. This prevents front-running attacks where an
     /// observer of the deployment transaction calls `initialize` first with
     /// their own admin address before the legitimate deployer can do so.
-    pub fn initialize(env: Env, deployer: Address, admin: Address, token: Address) {
+    pub fn initialize(
+        env: Env,
+        deployer: Address,
+        admin: Address,
+        token: Address,
+    ) -> Result<(), ContractError> {
         // Require the deployer's signature — only they can authorise this call.
         deployer.require_auth();
 
@@ -72,9 +96,14 @@ impl QuorumCreditContract {
             "already initialized"
         );
 
+        if is_zero_address(&env, &admin) || is_zero_address(&env, &token) {
+            return Err(ContractError::ZeroAddress);
+        }
+
         env.storage().instance().set(&DataKey::Deployer, &deployer);
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Token, &token);
+        Ok(())
     }
 
     /// Stake XLM to vouch for a borrower.
@@ -282,8 +311,6 @@ mod tests {
         let contract_id = env.register_contract(None, QuorumCreditContract);
         token_admin.mint(&contract_id, &50_000_000);
 
-        // deployer == admin for test convenience; the key point is that
-        // deployer.require_auth() is satisfied via mock_all_auths().
         QuorumCreditContractClient::new(env, &contract_id)
             .initialize(&admin, &admin, &token_id.address());
 
@@ -387,8 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stake_overflow_rejected() {
-        let env = Env::default();
+    fn test_stake_overflow_rejected() {        let env = Env::default();
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
@@ -422,5 +448,45 @@ mod tests {
             Err(Ok(ContractError::StakeOverflow)),
             "expected StakeOverflow on i128 overflow in stake summation"
         );
+    }
+
+    #[test]
+    fn test_initialize_rejects_zero_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let deployer = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract_v2(deployer.clone());
+        let contract_id = env.register_contract(None, QuorumCreditContract);
+
+        // All-zeros account strkey
+        let zero_admin = Address::from_string(
+            &soroban_sdk::String::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"),
+        );
+
+        let result = QuorumCreditContractClient::new(&env, &contract_id)
+            .try_initialize(&deployer, &zero_admin, &token_id.address());
+
+        assert_eq!(result, Err(Ok(ContractError::ZeroAddress)));
+    }
+
+    #[test]
+    fn test_initialize_rejects_zero_token() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let deployer = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let contract_id = env.register_contract(None, QuorumCreditContract);
+
+        // All-zeros contract strkey
+        let zero_token = Address::from_string(
+            &soroban_sdk::String::from_str(&env, "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"),
+        );
+
+        let result = QuorumCreditContractClient::new(&env, &contract_id)
+            .try_initialize(&deployer, &admin, &zero_token);
+
+        assert_eq!(result, Err(Ok(ContractError::ZeroAddress)));
     }
 }
