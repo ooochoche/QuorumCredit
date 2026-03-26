@@ -304,7 +304,7 @@ impl QuorumCreditContract {
         ReputationNftExternalClient::new(&env, &nft_addr).balance(&borrower)
     }
 
-    pub fn total_vouched(env: Env, borrower: Address) -> i128 {
+    pub fn total_vouched(env: Env, borrower: Address) -> Result<i128, ContractError> {
         vouch::total_vouched(env, borrower)
     }
 

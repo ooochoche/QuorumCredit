@@ -343,14 +343,21 @@ pub fn vouch_exists(env: Env, voucher: Address, borrower: Address) -> bool {
     vouches.iter().any(|v| v.voucher == voucher)
 }
 
-pub fn total_vouched(env: Env, borrower: Address) -> i128 {
-    env.storage()
+pub fn total_vouched(env: Env, borrower: Address) -> Result<i128, ContractError> {
+    let vouches = env
+        .storage()
         .persistent()
         .get::<DataKey, Vec<VouchRecord>>(&DataKey::Vouches(borrower))
-        .unwrap_or(Vec::new(&env))
-        .iter()
-        .map(|v| v.stake)
-        .sum()
+        .unwrap_or(Vec::new(&env));
+
+    let mut total: i128 = 0;
+    for vouch in vouches.iter() {
+        total = total
+            .checked_add(vouch.stake)
+            .ok_or(ContractError::StakeOverflow)?;
+    }
+
+    Ok(total)
 }
 
 pub fn voucher_history(env: Env, voucher: Address) -> Vec<Address> {
@@ -358,4 +365,114 @@ pub fn voucher_history(env: Env, voucher: Address) -> Vec<Address> {
         .persistent()
         .get(&DataKey::VoucherHistory(voucher))
         .unwrap_or(Vec::new(&env))
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::DataKey;
+    use crate::{QuorumCreditContract, QuorumCreditContractClient};
+    use soroban_sdk::{testutils::Address as _, Address, Env, Vec};
+
+    fn create_test_token(env: &Env) -> Address {
+        Address::generate(env)
+    }
+
+    fn create_test_admin(env: &Env) -> Address {
+        Address::generate(env)
+    }
+
+    #[test]
+    fn test_total_vouched_overflow() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumCreditContract);
+        let client = QuorumCreditContractClient::new(&env, &contract_id);
+
+        let deployer = Address::generate(&env);
+        let admin = create_test_admin(&env);
+        let admins = Vec::from_array(&env, [admin]);
+        let token = create_test_token(&env);
+
+        client.initialize(&deployer, &admins, &1, &token);
+
+        let borrower = Address::generate(&env);
+
+        // Create vouches that would overflow when summed
+        let mut vouches = Vec::new(&env);
+
+        // Add two vouches with very large stakes that would overflow i128::MAX
+        let voucher1 = Address::generate(&env);
+        let voucher2 = Address::generate(&env);
+
+        vouches.push_back(VouchRecord {
+            voucher: voucher1,
+            stake: i128::MAX - 1000,
+            vouch_timestamp: 0,
+        });
+
+        vouches.push_back(VouchRecord {
+            voucher: voucher2,
+            stake: 2000, // This would cause overflow when added to the first stake
+            vouch_timestamp: 0,
+        });
+
+        // Store the vouches directly in contract storage
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::Vouches(borrower.clone()), &vouches);
+        });
+
+        // Test that total_vouched returns StakeOverflow error
+        let result = client.try_total_vouched(&borrower);
+        assert_eq!(result, Err(Ok(ContractError::StakeOverflow)));
+    }
+
+    #[test]
+    fn test_total_vouched_no_overflow() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, QuorumCreditContract);
+        let client = QuorumCreditContractClient::new(&env, &contract_id);
+
+        let deployer = Address::generate(&env);
+        let admin = create_test_admin(&env);
+        let admins = Vec::from_array(&env, [admin]);
+        let token = create_test_token(&env);
+
+        client.initialize(&deployer, &admins, &1, &token);
+
+        let borrower = Address::generate(&env);
+
+        // Create vouches with normal stakes that won't overflow
+        let mut vouches = Vec::new(&env);
+
+        let voucher1 = Address::generate(&env);
+        let voucher2 = Address::generate(&env);
+
+        vouches.push_back(VouchRecord {
+            voucher: voucher1,
+            stake: 1_000_000,
+            vouch_timestamp: 0,
+        });
+
+        vouches.push_back(VouchRecord {
+            voucher: voucher2,
+            stake: 2_500_000,
+            vouch_timestamp: 0,
+        });
+
+        // Store the vouches directly in contract storage
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::Vouches(borrower.clone()), &vouches);
+        });
+
+        // Test that total_vouched returns correct sum
+        let result = client.total_vouched(&borrower);
+        assert_eq!(result, 3_500_000);
+    }
 }
