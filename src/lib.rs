@@ -49,7 +49,8 @@ pub enum ContractError {
     LoanExceedsMaxAmount = 11,
     InsufficientVouchers = 12,
     UnauthorizedCaller = 13,
-    VouchCooldownActive = 14,
+    LoanNotActive = 14,
+    DeadlineNotExtended = 15,
 }
 
 // ── Loan Status ───────────────────────────────────────────────────────────────
@@ -84,7 +85,7 @@ pub enum DataKey {
     PendingAdmin,            // Address of the pending admin (two-step transfer)
     RepaymentCount(Address), // borrower → u32 total successful repayments
     ProtocolFeeBps,          // u32: protocol fee in basis points
-    LastVouchTimestamp(Address), // voucher → u64 last vouch timestamp
+    ExtensionConsents(Address), // borrower → Vec<Address> vouchers who consented to extension
 }
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -968,9 +969,105 @@ impl QuorumCreditContract {
         }
     }
 
-    // ── Admin Setters ─────────────────────────────────────────────────────────
+    // ── Loan Extension ────────────────────────────────────────────────────────
 
-    /// Admin sets the minimum stake amount required per vouch (in stroops).
+    /// A voucher signals consent for extending the loan deadline of a borrower
+    /// they have staked on. Consent is recorded but does not by itself extend
+    /// the loan — an admin must call `extend_loan` to finalise the extension.
+    pub fn consent_extension(env: Env, voucher: Address, borrower: Address) {
+        voucher.require_auth();
+        Self::require_not_paused(&env).expect("contract is paused");
+
+        // Voucher must have an active stake on this borrower.
+        let vouches: Vec<VouchRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Vouches(borrower.clone()))
+            .expect("no vouches found for borrower");
+        assert!(
+            vouches.iter().any(|v| v.voucher == voucher),
+            "caller is not a voucher for this borrower"
+        );
+
+        let mut consents: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ExtensionConsents(borrower.clone()))
+            .unwrap_or(Vec::new(&env));
+
+        assert!(
+            !consents.iter().any(|a| a == voucher),
+            "already consented"
+        );
+        consents.push_back(voucher.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::ExtensionConsents(borrower.clone()), &consents);
+
+        env.events().publish(
+            (symbol_short!("ext"), symbol_short!("consent")),
+            (voucher, borrower),
+        );
+    }
+
+    /// Admin extends the loan deadline for a borrower.
+    ///
+    /// `new_deadline` must be strictly greater than the current deadline.
+    /// The admin may extend unilaterally; voucher consents recorded via
+    /// `consent_extension` are cleared after a successful extension so the
+    /// slate is clean for any future extension request.
+    pub fn extend_loan(
+        env: Env,
+        admin_signers: Vec<Address>,
+        borrower: Address,
+        new_deadline: u64,
+    ) -> Result<(), ContractError> {
+        Self::require_admin_approval(&env, &admin_signers);
+        Self::require_not_paused(&env)?;
+
+        let mut loan: LoanRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Loan(borrower.clone()))
+            .ok_or(ContractError::NoActiveLoan)?;
+
+        if loan.repaid || loan.defaulted {
+            return Err(ContractError::LoanNotActive);
+        }
+
+        assert!(
+            new_deadline > loan.deadline,
+            "new_deadline must be after current deadline"
+        );
+
+        loan.deadline = new_deadline;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Loan(borrower.clone()), &loan);
+
+        // Clear any recorded voucher consents — they apply to this extension only.
+        env.storage()
+            .persistent()
+            .remove(&DataKey::ExtensionConsents(borrower.clone()));
+
+        env.events().publish(
+            (symbol_short!("loan"), symbol_short!("extended")),
+            (borrower, new_deadline),
+        );
+
+        Ok(())
+    }
+
+    /// Returns the list of vouchers who have consented to a deadline extension
+    /// for the given borrower.
+    pub fn get_extension_consents(env: Env, borrower: Address) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ExtensionConsents(borrower))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    // ── Admin Setters ─────────────────────────────────────────────────────────
     pub fn set_min_stake(env: Env, admin_signers: Vec<Address>, amount: i128) {
         Self::require_admin_approval(&env, &admin_signers);
         assert!(amount >= 0, "min stake cannot be negative");
@@ -3310,5 +3407,111 @@ mod tests {
         borrowers.push_back(no_loan_borrower);
 
         client.batch_slash(&admin_signers, &borrowers);
+    }
+
+    // ── Loan Extension Tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_extend_loan_updates_deadline() {
+        let env = Env::default();
+        env.ledger().set_timestamp(1_000_000);
+        let (contract_id, _token_addr, admin, borrower, voucher) = setup(&env);
+        let client = QuorumCreditContractClient::new(&env, &contract_id);
+        let admin_signers = single_admin_signers(&env, &admin);
+
+        client.vouch(&voucher, &borrower, &1_000_000);
+        client.request_loan(&borrower, &Vec::new(&env), &500_000, &1_000_000);
+
+        let original_deadline = client.get_loan(&borrower).unwrap().deadline;
+        let new_deadline = original_deadline + 7 * 24 * 60 * 60; // +7 days
+
+        client.extend_loan(&admin_signers, &borrower, &new_deadline);
+
+        assert_eq!(client.get_loan(&borrower).unwrap().deadline, new_deadline);
+    }
+
+    #[test]
+    fn test_extend_loan_clears_voucher_consents() {
+        let env = Env::default();
+        env.ledger().set_timestamp(1_000_000);
+        let (contract_id, _token_addr, admin, borrower, voucher) = setup(&env);
+        let client = QuorumCreditContractClient::new(&env, &contract_id);
+        let admin_signers = single_admin_signers(&env, &admin);
+
+        client.vouch(&voucher, &borrower, &1_000_000);
+        client.request_loan(&borrower, &Vec::new(&env), &500_000, &1_000_000);
+
+        client.consent_extension(&voucher, &borrower);
+        assert_eq!(client.get_extension_consents(&borrower).len(), 1);
+
+        let new_deadline = client.get_loan(&borrower).unwrap().deadline + 1_000;
+        client.extend_loan(&admin_signers, &borrower, &new_deadline);
+
+        assert_eq!(client.get_extension_consents(&borrower).len(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "new_deadline must be after current deadline")]
+    fn test_extend_loan_rejects_earlier_deadline() {
+        let env = Env::default();
+        env.ledger().set_timestamp(1_000_000);
+        let (contract_id, _token_addr, admin, borrower, voucher) = setup(&env);
+        let client = QuorumCreditContractClient::new(&env, &contract_id);
+        let admin_signers = single_admin_signers(&env, &admin);
+
+        client.vouch(&voucher, &borrower, &1_000_000);
+        client.request_loan(&borrower, &Vec::new(&env), &500_000, &1_000_000);
+
+        let original_deadline = client.get_loan(&borrower).unwrap().deadline;
+        client.extend_loan(&admin_signers, &borrower, &(original_deadline - 1));
+    }
+
+    #[test]
+    fn test_extend_loan_no_loan_returns_error() {
+        let env = Env::default();
+        let (contract_id, _token_addr, admin, borrower, _voucher) = setup(&env);
+        let client = QuorumCreditContractClient::new(&env, &contract_id);
+        let admin_signers = single_admin_signers(&env, &admin);
+
+        let result = client.try_extend_loan(&admin_signers, &borrower, &9_999_999);
+        assert_eq!(result, Err(Ok(ContractError::NoActiveLoan)));
+    }
+
+    #[test]
+    fn test_consent_extension_recorded_and_deduplicated() {
+        let env = Env::default();
+        env.ledger().set_timestamp(1_000_000);
+        let (contract_id, _token_addr, _admin, borrower, voucher) = setup(&env);
+        let client = QuorumCreditContractClient::new(&env, &contract_id);
+
+        client.vouch(&voucher, &borrower, &1_000_000);
+        client.request_loan(&borrower, &Vec::new(&env), &500_000, &1_000_000);
+
+        client.consent_extension(&voucher, &borrower);
+        assert_eq!(client.get_extension_consents(&borrower).len(), 1);
+
+        // Second consent from same voucher must panic.
+        let result = std::panic::catch_unwind(|| {
+            client.consent_extension(&voucher, &borrower);
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "insufficient admin approvals")]
+    fn test_extend_loan_unauthorized_caller_rejected() {
+        let env = Env::default();
+        env.ledger().set_timestamp(1_000_000);
+        let (contract_id, _token_addr, _admin, borrower, voucher) = setup(&env);
+        let client = QuorumCreditContractClient::new(&env, &contract_id);
+
+        client.vouch(&voucher, &borrower, &1_000_000);
+        client.request_loan(&borrower, &Vec::new(&env), &500_000, &1_000_000);
+
+        // Non-admin tries to extend.
+        let outsider = Address::generate(&env);
+        let fake_signers = single_admin_signers(&env, &outsider);
+        let new_deadline = client.get_loan(&borrower).unwrap().deadline + 1_000;
+        client.extend_loan(&fake_signers, &borrower, &new_deadline);
     }
 }
